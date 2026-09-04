@@ -118,7 +118,7 @@ EOF
 }
 
 if (( INTERACTIVE )); then
-    [[ -t 0 && -t 1 ]] || fail "交互模式需要终端；非交互环境请至少提供 --room 和 --install-root。"
+    [[ -r /dev/tty && -t 1 ]] || fail "交互模式需要终端；非交互环境请提供 --room、--install-root、--quality 和 --port。"
     show_disks
     INSTALL_ROOT="$(ask_text '请输入安装根目录（建议选空间充足的已挂载磁盘）' '/opt/xhrec')"
     PORT="$(ask_text '请输入控制台端口' '8090')"
