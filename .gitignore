@@ -1,0 +1,10 @@
+# Never commit secrets, local configs, outputs, or downloaded binaries
+*.env
+!config.example.env
+*.local
+*.log
+*.mp4
+*.ts
+*.mkv
+XhRec-all.jar
+xhrec-github-token
