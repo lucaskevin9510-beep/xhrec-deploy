@@ -294,7 +294,7 @@ if ! id -u "$APP_USER" >/dev/null 2>&1; then
     run useradd --system --home-dir "$DATA_DIR" --no-create-home --shell /usr/sbin/nologin "$APP_USER"
 fi
 
-run install -d -o root -g "$APP_USER" -m 0750 "$INSTALL_ROOT" "$APP_DIR" "$CONFIG_DIR"
+run install -d -o root -g "$APP_USER" -m 0770 "$INSTALL_ROOT" "$APP_DIR" "$CONFIG_DIR"
 run install -d -o "$APP_USER" -g "$APP_USER" -m 0750 "$DATA_DIR" "$OUT_DIR" "$TMP_DIR" "$LOG_DIR"
 
 if (( DRY_RUN )); then
