@@ -68,6 +68,11 @@ normalize_room() {
     printf 'https://stripchat.com/%s' "$value"
 }
 
+# XhRec v1.2.0 某些构建会把 highest 错误地按数字解析；兼容为 1080p。
+normalize_quality() {
+    [[ "$1" == "highest" ]] && printf '1080p' || printf '%s' "$1"
+}
+
 while (($#)); do
     case "$1" in
         --room) need_arg "$@"; ROOMS+=("$(normalize_room "$2")"); shift 2 ;;
@@ -146,6 +151,8 @@ if (( INTERACTIVE )); then
 
     read -r -p '是否设置每段录制时长（秒）？正式长期监控建议直接回车: ' LIMIT </dev/tty
 fi
+
+QUALITY="$(normalize_quality "$QUALITY")"
 
 [[ -n "$INSTALL_ROOT" ]] || fail "必须选择 --install-root。"
 INSTALL_ROOT="$(realpath -m -- "$INSTALL_ROOT")"
