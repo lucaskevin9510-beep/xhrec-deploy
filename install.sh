@@ -134,7 +134,7 @@ if (( INTERACTIVE )); then
     PORT="$(ask_text '请输入控制台端口' '8090')"
     QUALITY="$(ask_quality)"
 
-    room="$(ask_text '请输入主播名（不用复制网址）' '主播名')"
+    room="$(ask_text '请输入主播名' '主播名')"
     room="$(normalize_room "$room")"
     ROOMS+=("$room")
     while true; do
