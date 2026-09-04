@@ -44,7 +44,7 @@ XhRec 交互式部署器
     --yes
 
 选项：
-  --room URL           房间地址；可重复填写以监控多个主播
+  --room NAME|URL      主播名或房间地址；可重复填写以监控多个主播
   --install-root DIR   安装根目录；程序、配置、录制和日志都放在这里
   --quality VALUE      240p、480p、720p、720p60、1080p、1080p60、highest
   --port PORT          XhRec 控制台端口，默认 8090
@@ -58,9 +58,19 @@ EOF
 }
 
 need_arg() { [[ $# -ge 2 ]] || fail "$1 缺少参数"; }
+
+normalize_room() {
+    local value="$1"
+    value="${value#https://stripchat.com/}"
+    value="${value%%/*}"
+    value="${value%%\?*}"
+    [[ "$value" =~ ^[A-Za-z0-9_.-]+$ ]] || fail "主播名格式错误：$1"
+    printf 'https://stripchat.com/%s' "$value"
+}
+
 while (($#)); do
     case "$1" in
-        --room) need_arg "$@"; ROOMS+=("$2"); shift 2 ;;
+        --room) need_arg "$@"; ROOMS+=("$(normalize_room "$2")"); shift 2 ;;
         --install-root) need_arg "$@"; INSTALL_ROOT="$2"; shift 2 ;;
         --quality) need_arg "$@"; QUALITY="$2"; shift 2 ;;
         --port) need_arg "$@"; PORT="$2"; shift 2 ;;
@@ -124,13 +134,14 @@ if (( INTERACTIVE )); then
     PORT="$(ask_text '请输入控制台端口' '8090')"
     QUALITY="$(ask_quality)"
 
-    room="$(ask_text '请输入 Stripchat 房间地址' 'https://stripchat.com/主播名')"
+    room="$(ask_text '请输入主播名（不用复制网址）' '主播名')"
+    room="$(normalize_room "$room")"
     ROOMS+=("$room")
     while true; do
         read -r -p '还要添加其他主播吗？[y/N]: ' answer </dev/tty
         [[ "$answer" =~ ^[Yy]$ ]] || break
-        read -r -p '请输入另一个房间地址: ' room </dev/tty
-        ROOMS+=("$room")
+        read -r -p '请输入另一个主播名: ' room </dev/tty
+        ROOMS+=("$(normalize_room "$room")")
     done
 
     read -r -p '是否设置每段录制时长（秒）？正式长期监控建议直接回车: ' LIMIT </dev/tty
@@ -150,7 +161,7 @@ if [[ -n "$LIMIT" ]]; then
 fi
 ((${#ROOMS[@]} > 0)) || fail "至少需要一个 --room。"
 for room in "${ROOMS[@]}"; do
-    [[ "$room" =~ ^https://stripchat\.com/[A-Za-z0-9_.-]+/?$ ]] || fail "房间地址格式错误：$room"
+    [[ "$room" =~ ^https://stripchat\.com/[A-Za-z0-9_.-]+$ ]] || fail "房间地址格式错误：$room"
 done
 
 APP_DIR="$INSTALL_ROOT/app"
