@@ -161,6 +161,7 @@ TMP_DIR="$INSTALL_ROOT/tmp"
 LOG_DIR="$INSTALL_ROOT/logs"
 JAR_PATH="$APP_DIR/XhRec-all.jar"
 LIST_FILE="$CONFIG_DIR/list.conf"
+POST_CONFIG="$CONFIG_DIR/postprocessor.json"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 JAR_URL="https://github.com/RikaCelery/XhRec/releases/download/${VERSION}/XhRec-all.jar"
 
@@ -233,6 +234,18 @@ else
     done
     chown root:"$APP_USER" "$LIST_FILE"
     chmod 0640 "$LIST_FILE"
+    cat > "$POST_CONFIG" <<EOF
+{
+  "default": [
+    {
+      "type": "fix_stamp",
+      "output": "$OUT_DIR"
+    }
+  ]
+}
+EOF
+    chown root:"$APP_USER" "$POST_CONFIG"
+    chmod 0640 "$POST_CONFIG"
 fi
 
 if (( DRY_RUN )); then
@@ -252,7 +265,7 @@ Type=simple
 User=$APP_USER
 Group=$APP_USER
 WorkingDirectory=$DATA_DIR
-ExecStart=/usr/bin/java -jar $JAR_PATH -f $LIST_FILE -o $OUT_DIR -t $TMP_DIR -p $PORT
+ExecStart=/usr/bin/java -jar $JAR_PATH -f $LIST_FILE -post $POST_CONFIG -o $OUT_DIR -t $TMP_DIR -p $PORT
 Restart=always
 RestartSec=15
 NoNewPrivileges=true
