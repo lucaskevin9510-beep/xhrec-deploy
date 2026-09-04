@@ -323,7 +323,8 @@ else
         printf '%s\n' "$line" >> "$LIST_FILE"
     done
     chown root:"$APP_USER" "$LIST_FILE"
-    chmod 0640 "$LIST_FILE"
+    # 面板添加、停用和停止录制都会回写 list.conf。
+    chmod 0660 "$LIST_FILE"
     cat > "$POST_CONFIG" <<EOF
 {
   "default": [
