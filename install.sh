@@ -9,6 +9,11 @@ QUALITY="highest"
 LIMIT=""
 COOKIE=""
 COOKIE_FILE=""
+TELEGRAM_TOKEN=""
+TELEGRAM_CHAT_ID=""
+NOTIFY_ENABLED=0
+NOTIFY_SOURCE=""
+TELEGRAM_CONFIG_FILE=""
 INSTALL_ROOT=""
 SERVICE_NAME="xhrec"
 APP_USER="xhrec"
@@ -53,6 +58,7 @@ XhRec 交互式部署器
   --port PORT          XhRec 控制台端口，默认 8090
   --limit SECONDS      每段录制时长；留空表示不限制（正式监控推荐留空）
   --cookie-file FILE   从本地文件读取 Cookie；不在命令行中显示内容
+  --telegram-config FILE  从本地 env 文件读取 Telegram 配置
   --version VERSION    XhRec 版本，默认 v1.2.0
   --service-name NAME  systemd 服务名，默认 xhrec
   --yes                非交互确认
@@ -86,6 +92,7 @@ while (($#)); do
         --port) need_arg "$@"; PORT="$2"; shift 2 ;;
         --limit) need_arg "$@"; LIMIT="$2"; shift 2 ;;
         --cookie-file) need_arg "$@"; COOKIE_FILE="$2"; shift 2 ;;
+        --telegram-config) need_arg "$@"; TELEGRAM_CONFIG_FILE="$2"; NOTIFY_ENABLED=1; shift 2 ;;
         --version) need_arg "$@"; VERSION="$2"; shift 2 ;;
         --service-name) need_arg "$@"; SERVICE_NAME="$2"; shift 2 ;;
         --uninstall) UNINSTALL=1; shift ;;
@@ -123,7 +130,7 @@ ask_quality() {
     local choice=""
     cat >/dev/tty <<'EOF'
 请选择录制画质：
-  1) highest  自动选择最高画质（推荐）
+  1) highest  自动选择最高画质（当前版本兼容为 1080p）
   2) 1080p
   3) 1080p60
   4) 720p
@@ -197,6 +204,12 @@ EOF
         read -r -s -p '请输入 Cookie（输入不会显示）: ' COOKIE </dev/tty
         printf '\n' >/dev/tty
     fi
+    if ask_yes_no '是否启用 Telegram 通知？' 0; then
+        NOTIFY_ENABLED=1
+        read -r -s -p '请输入 Telegram Bot Token（输入不会显示）: ' TELEGRAM_TOKEN </dev/tty
+        printf '\n' >/dev/tty
+        TELEGRAM_CHAT_ID="$(ask_text '请输入 Telegram Chat ID' '')"
+    fi
     fi
 fi
 
@@ -207,6 +220,7 @@ INSTALL_ROOT="$(realpath -m -- "$INSTALL_ROOT")"
 [[ "$INSTALL_ROOT" == /* ]] || fail "安装目录必须是绝对路径。"
 [[ "$INSTALL_ROOT" != "/" ]] || fail "不能把系统根目录作为安装目录。"
 [[ "$INSTALL_ROOT" != *$'\n'* ]] || fail "安装路径不能包含换行。"
+[[ "$INSTALL_ROOT" != *[[:space:]]* ]] || fail "安装路径不能包含空格或其他空白字符，请换一个目录。"
 [[ "$SERVICE_NAME" =~ ^[A-Za-z0-9_.@-]+$ ]] || fail "服务名包含不支持的字符。"
 [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "版本号应类似 v1.2.0。"
 if (( ! UNINSTALL )); then
@@ -234,6 +248,10 @@ SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 JAR_URL="https://github.com/RikaCelery/XhRec/releases/download/${VERSION}/XhRec-all.jar"
 USERS_FILE="$DATA_DIR/users.txt"
 RUNTIME_CONFIG="$DATA_DIR/xhrec.json"
+NOTIFY_SCRIPT="$APP_DIR/xhrec-notify.sh"
+NOTIFY_CONFIG="$CONFIG_DIR/telegram.env"
+NOTIFY_SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}-notify.service"
+NOTIFY_SOURCE_URL="https://raw.githubusercontent.com/lucaskevin9510-beep/xhrec-deploy/main/xhrec-notify.sh"
 
 if (( UNINSTALL )); then
     if (( DRY_RUN )); then
@@ -245,7 +263,10 @@ if (( UNINSTALL )); then
         [[ -z "$answer" || "$answer" =~ ^[Yy]$ ]] || fail "已取消卸载。"
     fi
     systemctl disable --now "$SERVICE_NAME.service" 2>/dev/null || true
-    rm -f "$SERVICE_FILE" "/etc/systemd/system/multi-user.target.wants/${SERVICE_NAME}.service"
+    systemctl disable --now "${SERVICE_NAME}-notify.service" 2>/dev/null || true
+    rm -f "$SERVICE_FILE" "$NOTIFY_SERVICE_FILE" \
+        "/etc/systemd/system/multi-user.target.wants/${SERVICE_NAME}.service" \
+        "/etc/systemd/system/multi-user.target.wants/${SERVICE_NAME}-notify.service"
     systemctl daemon-reload
     rm -rf -- "$INSTALL_ROOT"
     if id -u "$APP_USER" >/dev/null 2>&1 && ! systemctl list-unit-files --no-legend | grep -q '^xhrec.service'; then
@@ -280,6 +301,8 @@ printf '  开机启动：是\n'
 printf '  异常重启：是，15 秒后重启\n'
 printf '  自动付费：否\n'
 printf '  Cookie：%s\n' "$([[ -n "$COOKIE_FILE" || -n "$COOKIE" ]] && echo 已配置 || echo 未配置)"
+printf '  面板协议：HTTP（建议仅通过 SSH 隧道访问）\n'
+printf '  Telegram 通知：%s\n' "$([[ "$NOTIFY_ENABLED" == 1 ]] && echo 已启用 || echo 未启用)"
 
 if (( ! ASSUME_YES && ! DRY_RUN )); then
     read -r -p '确认按以上设置安装吗？[Y/n]: ' answer </dev/tty
@@ -297,9 +320,22 @@ fi
 run install -d -o root -g "$APP_USER" -m 0770 "$INSTALL_ROOT" "$APP_DIR" "$CONFIG_DIR"
 run install -d -o "$APP_USER" -g "$APP_USER" -m 0750 "$DATA_DIR" "$OUT_DIR" "$TMP_DIR" "$LOG_DIR"
 
-if (( DRY_RUN )); then
-    log "将从以下地址下载：$JAR_URL"
-else
+if (( NOTIFY_ENABLED )); then
+    if [[ -n "$TELEGRAM_CONFIG_FILE" ]]; then
+        [[ -r "$TELEGRAM_CONFIG_FILE" ]] || fail "Telegram 配置文件不可读：$TELEGRAM_CONFIG_FILE"
+    else
+        [[ -n "$TELEGRAM_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]] || fail "Telegram 配置不完整。"
+    fi
+fi
+
+if (( NOTIFY_ENABLED && ! DRY_RUN )); then
+    NOTIFY_SOURCE="$(mktemp)"
+    trap 'rm -f "$NOTIFY_SOURCE"' EXIT
+    curl --fail --location --retry 3 -o "$NOTIFY_SOURCE" "$NOTIFY_SOURCE_URL"
+    chmod 0750 "$NOTIFY_SOURCE"
+fi
+
+if (( ! DRY_RUN )); then
     tmp_jar="$(mktemp)"
     trap 'rm -f "$tmp_jar"' EXIT
     curl --fail --location --retry 3 --proto '=https' --tlsv1.2 -o "$tmp_jar" "$JAR_URL"
@@ -309,6 +345,8 @@ else
     sha256sum "$JAR_PATH" > "$APP_DIR/XhRec-all.jar.sha256"
     rm -f "$tmp_jar"
     trap - EXIT
+else
+    log "模拟模式：不下载 JAR，不创建服务。"
 fi
 
 if (( DRY_RUN )); then
@@ -337,6 +375,18 @@ else
 EOF
     chown root:"$APP_USER" "$POST_CONFIG"
     chmod 0640 "$POST_CONFIG"
+    if (( NOTIFY_ENABLED )); then
+        install -o root -g "$APP_USER" -m 0750 "$NOTIFY_SOURCE" "$NOTIFY_SCRIPT"
+    fi
+    if (( NOTIFY_ENABLED )); then
+        if [[ -n "$TELEGRAM_CONFIG_FILE" ]]; then
+            install -o root -g "$APP_USER" -m 0640 "$TELEGRAM_CONFIG_FILE" "$NOTIFY_CONFIG"
+        else
+            printf 'TELEGRAM_BOT_TOKEN=%q\nTELEGRAM_CHAT_ID=%q\n' "$TELEGRAM_TOKEN" "$TELEGRAM_CHAT_ID" > "$NOTIFY_CONFIG"
+            chown root:"$APP_USER" "$NOTIFY_CONFIG"
+            chmod 0640 "$NOTIFY_CONFIG"
+        fi
+    fi
     if [[ -f "$RUNTIME_CONFIG" ]]; then
         python3 - "$RUNTIME_CONFIG" <<'PY'
 import json, sys
@@ -402,6 +452,39 @@ EOF
     chmod 0644 "$SERVICE_FILE"
     systemctl daemon-reload
     systemctl enable --now "$SERVICE_NAME.service"
+    if (( NOTIFY_ENABLED )); then
+        cat > "$NOTIFY_SERVICE_FILE" <<EOF
+[Unit]
+Description=XhRec Telegram 通知
+After=$SERVICE_NAME.service
+
+[Service]
+Type=simple
+User=$APP_USER
+Group=$APP_USER
+WorkingDirectory=$DATA_DIR
+Environment=XHREC_NOTIFY_CONFIG=$NOTIFY_CONFIG
+Environment=XHREC_ROOM_LOG=$DATA_DIR/logs/xhrec.log
+Environment=XHREC_OUTPUT_DIR=$OUT_DIR
+Environment=XHREC_ROOM_LIST=$LIST_FILE
+Environment=XHREC_NOTIFY_STATE_DIR=$DATA_DIR/notify-state
+ExecStart=$NOTIFY_SCRIPT
+Restart=always
+RestartSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=false
+ReadWritePaths=$DATA_DIR $LOG_DIR
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        chmod 0644 "$NOTIFY_SERVICE_FILE"
+        systemctl daemon-reload
+        systemctl enable --now "${SERVICE_NAME}-notify.service"
+    fi
     sleep 3
     systemctl is-active --quiet "$SERVICE_NAME.service" || {
         systemctl status "$SERVICE_NAME.service" --no-pager || true
@@ -415,14 +498,14 @@ printf '  成品：%s\n' "$OUT_DIR"
 printf '  配置：%s\n' "$LIST_FILE"
 printf '  日志：%s/service.log\n' "$LOG_DIR"
 printf '\n常用命令：\n'
-printf '  systemctl status %s --no-pager\n' "$SERVICE_NAME"
-printf '  journalctl -u %s -f\n' "$SERVICE_NAME"
-printf '  ls -lh %q\n' "$OUT_DIR"
-printf '  systemctl restart %s\n' "$SERVICE_NAME"
-printf '  systemctl stop %s\n' "$SERVICE_NAME"
+printf '  systemctl status %s --no-pager  # 查看服务状态\n' "$SERVICE_NAME"
+printf '  journalctl -u %s -f              # 查看实时日志\n' "$SERVICE_NAME"
+printf '  ls -lh %q                    # 查看已导出视频\n' "$OUT_DIR"
+printf '  systemctl restart %s             # 重启录制服务\n' "$SERVICE_NAME"
+printf '  systemctl stop %s                # 停止录制服务\n' "$SERVICE_NAME"
 printf '  bash install.sh --uninstall --install-root %q  # 卸载服务和本次安装文件\n' "$INSTALL_ROOT"
 
 warn "XhRec 当前版本的控制台可能监听所有网卡。脚本不会自动修改防火墙；不要在云防火墙中向公网开放 $PORT。"
 printf '推荐通过 SSH 隧道访问控制台：\n'
 printf '  ssh -N -L %s:127.0.0.1:%s root@服务器地址\n' "$PORT" "$PORT"
-printf '然后打开：https://127.0.0.1:%s\n' "$PORT"
+printf '然后打开：http://127.0.0.1:%s\n' "$PORT"

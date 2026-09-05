@@ -1,54 +1,75 @@
 #!/usr/bin/env bash
-# XhRec Telegram 通知器：读取事件 JSONL，所有通知都带主播名。
+# XhRec Telegram 通知服务：只处理启动后的新增日志和新导出文件。
 set -Eeuo pipefail
 
-CONFIG="${XHREC_NOTIFY_CONFIG:-/etc/xhrec/telegram.env}"
-EVENTS="${XHREC_EVENTS_FILE:-/var/lib/xhrec/events/events.jsonl}"
-STATE="${XHREC_NOTIFY_STATE:-/var/lib/xhrec/events/notify.state}"
-
-[[ -r "$CONFIG" ]] || { printf '找不到 Telegram 配置：%s\n' "$CONFIG" >&2; exit 1; }
+CONFIG="${XHREC_NOTIFY_CONFIG:?缺少 XHREC_NOTIFY_CONFIG}"
+ROOM_LOG="${XHREC_ROOM_LOG:?缺少 XHREC_ROOM_LOG}"
+OUTPUT_DIR="${XHREC_OUTPUT_DIR:?缺少 XHREC_OUTPUT_DIR}"
+ROOM_LIST="${XHREC_ROOM_LIST:?缺少 XHREC_ROOM_LIST}"
+STATE_DIR="${XHREC_NOTIFY_STATE_DIR:?缺少 XHREC_NOTIFY_STATE_DIR}"
+INTERVAL="${XHREC_NOTIFY_INTERVAL:-15}"
+TELEGRAM_API_BASE="${TELEGRAM_API_BASE:-https://api.telegram.org}"
+mkdir -p "$STATE_DIR"
 # shellcheck disable=SC1090
 . "$CONFIG"
 : "${TELEGRAM_BOT_TOKEN:?缺少 TELEGRAM_BOT_TOKEN}"
 : "${TELEGRAM_CHAT_ID:?缺少 TELEGRAM_CHAT_ID}"
-mkdir -p "$(dirname "$STATE")"
-touch "$STATE"
+
+log_cursor="$STATE_DIR/log.cursor"
+file_state="$STATE_DIR/files.sent"
 
 send() {
   local text="$1"
   curl --fail --silent --show-error --retry 3 \
-    -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+    -X POST "${TELEGRAM_API_BASE}/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
     --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
     --data-urlencode "text=${text}" >/dev/null
 }
 
-format_event() {
-  python3 - "$1" <<'PY'
-import json, sys
-x=json.loads(sys.argv[1])
-name=x.get('主播名') or x.get('room_name') or x.get('room') or '未知主播'
-event=x.get('event','')
-when=x.get('time','')
-file=x.get('file','')
-size=x.get('size','')
-duration=x.get('duration','')
-messages={
- 'online': f'🟢 主播上线\n\n主播：{name}\n状态：已开始录制\n时间：{when}',
- 'interrupted': f'🟠 直播流暂时中断\n\n主播：{name}\n状态：正在自动重连\n说明：暂不判断为下播\n时间：{when}',
- 'unavailable': f'🟡 当前无法获取视频流\n\n主播：{name}\n可能原因：私秀、票房直播、授权失效或平台限制\n处理：保留监控，等待恢复\n时间：{when}',
- 'recovered': f'🔵 直播流已恢复\n\n主播：{name}\n状态：已继续录制\n时间：{when}',
- 'offline': f'⚫ 主播已下播\n\n主播：{name}\n状态：录制结束\n时间：{when}',
- 'exported': f'✅ 视频已导出\n\n主播：{name}\n时长：{duration or "未知"}\n大小：{size or "未知"}\n文件：{file or "未知"}',
-}
-print(messages.get(event, f'ℹ️ 录制状态更新\n\n主播：{name}\n事件：{event}\n时间：{when}'))
-PY
-}
+# 首次启动建立日志和文件基线，避免把历史录制重复通知。
+if [[ ! -e "$log_cursor" ]]; then
+  if [[ -f "$ROOM_LOG" ]]; then
+    wc -c < "$ROOM_LOG" > "$log_cursor"
+  else
+    printf '0\n' > "$log_cursor"
+  fi
+fi
+if [[ ! -e "$file_state" ]]; then
+  find "$OUTPUT_DIR" -maxdepth 1 -type f -name '*.fixed.mp4' -printf '%p\n' 2>/dev/null | sort > "$file_state" || :
+fi
 
-while IFS= read -r line; do
-  [[ -z "$line" ]] && continue
-  id="$(printf '%s' "$line" | sha256sum | cut -d' ' -f1)"
-  grep -qxF "$id" "$STATE" && continue
-  msg="$(format_event "$line")"
-  send "$msg"
-  printf '%s\n' "$id" >> "$STATE"
-done < <(tail -n 0 -F "$EVENTS")
+while true; do
+  if [[ -f "$ROOM_LOG" ]]; then
+    old="$(cat "$log_cursor" 2>/dev/null || printf '0')"
+    size="$(wc -c < "$ROOM_LOG")"
+    if [[ "$size" =~ ^[0-9]+$ && "$old" =~ ^[0-9]+$ && "$size" -lt "$old" ]]; then old=0; fi
+    if (( size > old )); then
+      while IFS= read -r line; do
+        if [[ "$line" =~ start[[:space:]]recording[[:space:]]([^\(]+)\( ]]; then
+          name="${BASH_REMATCH[1]}"
+          send "🟢 主播上线\n\n主播：$name\n状态：已开始录制\n时间：$(date '+%Y-%m-%d %H:%M:%S')"
+        elif [[ "$line" =~ session[[:space:]]start[[:space:]]failed ]]; then
+          names="$(awk 'NF && $1 !~ /^[#;]/ {u=$1; sub(/^.*\//,"",u); print u}' "$ROOM_LIST" 2>/dev/null | paste -sd '、' -)"
+          send "🟡 当前无法获取视频流\n\n主播：${names:-监控列表中的主播}\n说明：可能是私秀、票房、授权失效、网络故障或平台限制\n处理：继续重试\n时间：$(date '+%Y-%m-%d %H:%M:%S')"
+        elif [[ "$line" =~ stop[[:space:]]recording[[:space:]]([^\(]+)\( ]]; then
+          name="${BASH_REMATCH[1]}"
+          send "⚫ 录制会话结束\n\n主播：$name\n说明：可能是下播、达到时长限制或手动停止\n时间：$(date '+%Y-%m-%d %H:%M:%S')"
+        fi
+      done < <(tail -c +$((old + 1)) "$ROOM_LOG")
+      printf '%s\n' "$size" > "$log_cursor"
+    fi
+  fi
+
+  if [[ -d "$OUTPUT_DIR" ]]; then
+    find "$OUTPUT_DIR" -maxdepth 1 -type f -name '*.fixed.mp4' -printf '%p\n' 2>/dev/null | sort | while IFS= read -r file; do
+      grep -Fqx "$file" "$file_state" 2>/dev/null && continue
+      name="$(basename "$file")"
+      name="$(printf '%s' "$name" | sed -E 's/-[0-9]{4}_[0-9]{2}_[0-9]{2}-.*$//')"
+      size="$(stat -c '%s' "$file" 2>/dev/null || printf '0')"
+      human="$(numfmt --to=iec --suffix=B "$size" 2>/dev/null || printf '%s bytes' "$size")"
+      send "✅ 视频已导出\n\n主播：${name:-未知}\n文件：$(basename "$file")\n大小：$human\n时间：$(date '+%Y-%m-%d %H:%M:%S')"
+      printf '%s\n' "$file" >> "$file_state"
+    done
+  fi
+  sleep "$INTERVAL"
+done
